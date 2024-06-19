@@ -78,7 +78,8 @@ class BabyCryDetector {
     private let babyCryDetectionModel: MLModel
     private let bufferQueue: CircularBuffer<Float>
     private let sampleRate: Double
-    private let bufferLengthInSeconds: Double = 1.0
+    private let bufferLengthInSeconds: Double = 2.0
+    private let processingInterval: Double = 0.1
     private weak var viewController: ViewController?
     
     init(melSpectrogramModel: MLModel, babyCryDetectionModel: MLModel, viewController: ViewController) {
@@ -86,8 +87,8 @@ class BabyCryDetector {
         self.babyCryDetectionModel = babyCryDetectionModel
         self.viewController = viewController
         self.inputNode = audioEngine.inputNode
-        self.sampleRate = 44100.0
-        self.bufferSize = AVAudioFrameCount(sampleRate * bufferLengthInSeconds)
+        self.sampleRate = 22050.0//44100.0
+        self.bufferSize = AVAudioFrameCount(sampleRate * processingInterval)
         self.bufferQueue = CircularBuffer<Float>(capacity: Int(bufferSize))
         
         setupAudioSession()
@@ -139,8 +140,8 @@ class BabyCryDetector {
     }
     
     private func createMelSpectrogram(from audioData: [Float]) -> MLMultiArray? {
-//        let audioBuffer = try? MLMultiArray(shape: [1, NSNumber(value: audioData.count)], dataType: .float32)
-        let audioBuffer = try? MLMultiArray(shape: [1, 44100], dataType: .float32) // Adjusted to match model input shape
+        let audioBuffer = try? MLMultiArray(shape: [1, NSNumber(value: audioData.count)], dataType: .float32)
+//        let audioBuffer = try? MLMultiArray(shape: [1, 44100], dataType: .float32) // Adjusted to match model input shape
 
         for (index, value) in audioData.enumerated() {
             audioBuffer?[index] = NSNumber(value: value)
@@ -222,7 +223,7 @@ class CircularBuffer<T> {
     func push(_ element: T) {
         buffer[writeIndex] = element
         writeIndex = (writeIndex + 1) % buffer.count
-        
+        print("Write:", writeIndex)
         if size < buffer.count {
             size += 1
         } else {
