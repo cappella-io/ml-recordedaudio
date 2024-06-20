@@ -22,24 +22,11 @@ class ViewController: UIViewController {
             let babyCryDetectionModel = try encodedBabyCryDetectionModel(configuration: MLModelConfiguration())
             babyCryDetector = BabyCryDetector(melSpectrogramModel: melSpectrogramModel.model, babyCryDetectionModel: babyCryDetectionModel.model, viewController: self)
             babyCryDetector?.startDetection()
+            
         } catch {
             fatalError("Failed to load models: \(error.localizedDescription)")
         }
     }
-    
-//    private func printAllFilesInBundle() {
-//            let fileManager = FileManager.default
-//            let bundleURL = Bundle.main.bundleURL
-//            
-//            do {
-//                let fileURLs = try fileManager.contentsOfDirectory(at: bundleURL, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)
-//                for fileURL in fileURLs {
-//                    print("File URL: \(fileURL)")
-//                }
-//            } catch {
-//                print("Error while enumerating files \(bundleURL.path): \(error.localizedDescription)")
-//            }
-//        }
     
     private func setupUI() {
         view.backgroundColor = .white
@@ -78,18 +65,20 @@ class BabyCryDetector {
     private let babyCryDetectionModel: MLModel
     private let bufferQueue: CircularBuffer<Float>
     private let sampleRate: Double
-    private let bufferLengthInSeconds: Double = 2.0
+    private let bufferLengthInSeconds: Double = 1.0
     private let processingInterval: Double = 0.1
     private weak var viewController: ViewController?
+    private var detectInRow: Int = 0
+    private let sensitivity: Int = 3
     
     init(melSpectrogramModel: MLModel, babyCryDetectionModel: MLModel, viewController: ViewController) {
         self.melSpectrogramModel = melSpectrogramModel
         self.babyCryDetectionModel = babyCryDetectionModel
         self.viewController = viewController
         self.inputNode = audioEngine.inputNode
-        self.sampleRate = 22050.0//44100.0
-        self.bufferSize = AVAudioFrameCount(sampleRate * processingInterval)
-        self.bufferQueue = CircularBuffer<Float>(capacity: Int(bufferSize))
+        self.sampleRate = 44100.0
+        self.bufferSize = AVAudioFrameCount(sampleRate * bufferLengthInSeconds)
+        self.bufferQueue = CircularBuffer<Float>(capacity: Int(sampleRate))
         
         setupAudioSession()
         setupAudioEngine()
@@ -140,8 +129,7 @@ class BabyCryDetector {
     }
     
     private func createMelSpectrogram(from audioData: [Float]) -> MLMultiArray? {
-        let audioBuffer = try? MLMultiArray(shape: [1, NSNumber(value: audioData.count)], dataType: .float32)
-//        let audioBuffer = try? MLMultiArray(shape: [1, 44100], dataType: .float32) // Adjusted to match model input shape
+        let audioBuffer = try? MLMultiArray(shape: [1, 44100], dataType: .float32) // Adjusted to match model input shape
 
         for (index, value) in audioData.enumerated() {
             audioBuffer?[index] = NSNumber(value: value)
@@ -152,7 +140,7 @@ class BabyCryDetector {
             let input = wave_to_logmelInput(x_1: audioBuffer!)
             let prediction = try model.prediction(input: input)
             let output = prediction.var_62
-            return output//output?.featureValue(for: "melSpectrogram")?.multiArrayValue
+            return output
         } catch {
             print("Failed to generate mel spectrogram: \(error.localizedDescription)")
             return nil
@@ -160,41 +148,47 @@ class BabyCryDetector {
     }
     
     private func detectBabyCry(using melSpectrogram: MLMultiArray) -> Bool? {
-        do {
-            let model = try encodedBabyCryDetectionModel(configuration: MLModelConfiguration())
-            let input = encodedBabyCryDetectionModelInput(audio: melSpectrogram)
-            let prediction = try model.prediction(input: input)
-            
-            //Assuming the output property is a float value indicating the logit
-            let logitArray = prediction.var_104ShapedArray
-//            print("Logit array:", logitArray)
-            
-            // Extract the logit value from the MLShapedArray
-            let logitSlice = logitArray[0]
-            guard let logit = logitSlice.scalar else {
-                print("Failed to extract logit value.")
-                return nil
-            }
-//            print("Logit value:", logit)
-            let sigmoid = 1 / (1 + exp(-logit))
-//            print("Probability:", probability)
-            
-            // Use a threshold of 0.5 to convert rawValue to 0 or 1
-                let threshold: Float = 0.5
-                let babyCryDetected = sigmoid >= threshold
-            
-            print("Raw Output:\(logitArray), Sigmoid:\(sigmoid), Baby Cry:\(babyCryDetected)")
-            
-            if sigmoid == 1 {
-                return true
-            } else {
-                return false//prediction.featureValue(for: "output")?.intValue == 1
-            }
-            } catch {
-                print("Failed to generate mel spectrogram: \(error.localizedDescription)")
-                return nil
-            }
-    }
+          do {
+              let model = try encodedBabyCryDetectionModel(configuration: MLModelConfiguration())
+              let input = encodedBabyCryDetectionModelInput(audio: melSpectrogram)
+              let prediction = try model.prediction(input: input)
+              //Assuming the output property is a float value indicating the logit
+              let logitArray = prediction.var_104ShapedArray
+              // Extract the logit value from the MLShapedArray
+              let logitSlice = logitArray[0]
+              guard let logit = logitSlice.scalar else {
+                  print("Failed to extract logit value.")
+                  return nil
+              }
+  //            print("Logit value:", logit)
+              let sigmoid = 1 / (1 + exp(-logit))
+  //            print("Probability:", probability)
+              
+              // Use a threshold of 0.5 to convert rawValue to 0 or 1
+                  let threshold: Float = 0.5
+                  let babyCryDetected = sigmoid >= threshold
+              
+              print("Raw Output:\(logitArray), Sigmoid:\(sigmoid), Baby Cry:\(babyCryDetected)")
+              
+              //Check for baby cry loop for 18 consecutive times
+              if babyCryDetected == true { // Change the condition to check for noise
+                  self.detectInRow += 1
+                  print("Detection in a row:", self.detectInRow)
+                  if self.detectInRow == self.sensitivity {
+                      self.detectInRow = 0
+                      return true
+                  } else {
+                      return false
+                  }
+              } else {
+                  self.detectInRow = 0 // Reset counter if no noise is detected
+                  return false
+              }
+              } catch {
+                  print("Failed to generate mel spectrogram: \(error.localizedDescription)")
+                  return nil
+              }
+      }
     
     private func triggerAlert() {
         viewController?.updateStatusLabel(with: "Baby cry detected!")
@@ -223,7 +217,7 @@ class CircularBuffer<T> {
     func push(_ element: T) {
         buffer[writeIndex] = element
         writeIndex = (writeIndex + 1) % buffer.count
-        print("Write:", writeIndex)
+        
         if size < buffer.count {
             size += 1
         } else {
@@ -303,10 +297,10 @@ extension CircularBuffer where T: ExpressibleByFloatLiteral {
 //                // failed to record!
 //            }
 //    }
-//    
+//
 //    func startRecording() {
 //        fileName = getDocumentsDirectory().appendingPathComponent("recording.wav")
-//        
+//
 //        let settings = [
 //            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
 //            AVSampleRateKey: 44100,
@@ -348,13 +342,13 @@ extension CircularBuffer where T: ExpressibleByFloatLiteral {
 //                    print ("failed...")
 //                }
 //    }
-//    
+//
 //    func getDocumentsDirectory() -> URL {
 //        let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
 //        print("Audio Path: ", paths[0])
 //        return paths[0]
 //    }
-//    
+//
 //    func generateMelSpectrogram() -> MLMultiArray? {
 ////        let monoSignal: [Float] =
 ////        print("Mono Signal:", monoSignal.prefix(upTo: 5))
@@ -363,10 +357,10 @@ extension CircularBuffer where T: ExpressibleByFloatLiteral {
 //            print("Failed to create MLMultiArray.")
 //            return nil
 //        }
-//        
+//
 //        var monoSignal = [Float](repeating: 0, count: Int(audioData.frameLength))
 //        print("Mono Signal:", monoSignal.prefix(upTo: 5))
-//        
+//
 //        for i in 0..<monoSignal.count {
 //            tensor[i] = NSNumber(value: monoSignal[i])
 //        }
@@ -381,7 +375,7 @@ extension CircularBuffer where T: ExpressibleByFloatLiteral {
 //            print("var_62:", prediction.var_62)
 //            print("var_62 Shaped Array:", prediction.var_62ShapedArray)
 //            print("var_62 Values:", prediction.featureValue(for: "var_62")!)
-//            
+//
 //            let model1 = try encodedBabyCryDetectionModel(configuration: MLModelConfiguration())
 //            let input1 = encodedBabyCryDetectionModelInput(audio: prediction.var_62ShapedArray)
 //            let prediction1 = try model1.prediction(input: input1)
@@ -390,7 +384,7 @@ extension CircularBuffer where T: ExpressibleByFloatLiteral {
 //            print("var_104:", prediction1.var_104)
 //            print("var_104 Shaped Array:", prediction1.var_104ShapedArray)
 //            print("var_104 Values:", prediction1.featureValue(for: "var_104")!)
-//            
+//
 //            //Assuming the output property is a float value indicating the logit
 //            let logitArray = prediction1.var_104ShapedArray // Replace 'output' with the actual property name
 //            print("Logit array:", logitArray)
