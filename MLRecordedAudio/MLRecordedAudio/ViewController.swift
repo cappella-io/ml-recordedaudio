@@ -11,22 +11,40 @@ import CoreML
 import SoundAnalysis
 
 class ViewController: UIViewController {
+    @IBOutlet var testFrequencyTextFiled: UITextField!
+    @IBOutlet var detectionSensitivityTextField: UITextField!
+    @IBOutlet var cryEndThresholdTextField: UITextField!
+    @IBOutlet var cryTranslationLength: UITextField!
+    @IBOutlet var startDetectionButton: UIButton!
+    @IBOutlet var cryOutputLabel: UILabel!
+    @IBOutlet var cryStatusLabel: UILabel!
     private var babyCryDetector: BabyCryDetector?
     private let statusLabel = UILabel()
+    var isDetecting = false
     
     override func viewDidLoad() {
         super.viewDidLoad()
-        setupUI()
-        do {
-            let melSpectrogramModel = try wave_to_logmel(configuration: MLModelConfiguration())
-            let babyCryDetectionModel = try encodedBabyCryDetectionModel(configuration: MLModelConfiguration())
-            babyCryDetector = BabyCryDetector(melSpectrogramModel: melSpectrogramModel.model, babyCryDetectionModel: babyCryDetectionModel.model, viewController: self)
-            babyCryDetector?.startDetection()
-            
-        } catch {
-            fatalError("Failed to load models: \(error.localizedDescription)")
-        }
+        
     }
+    
+    func setupBabyCryDetector(cryTranslationLength: Double, testFrequency: Double, detectionSensitivity: Int, cryEndThreshold: Int) {
+        do {
+                let melSpectrogramModel = try wave_to_logmel(configuration: MLModelConfiguration())
+                let babyCryDetectionModel = try encodedBabyCryDetectionModel(configuration: MLModelConfiguration())
+                babyCryDetector = BabyCryDetector(
+                           melSpectrogramModel: melSpectrogramModel.model,
+                           babyCryDetectionModel: babyCryDetectionModel.model,
+                           viewController: self,
+                           cryTranslationLength: cryTranslationLength,
+                           testFrequency: testFrequency,
+                           detectionSensitivity: detectionSensitivity,
+                           cryEndThreshold: cryEndThreshold
+                       )
+                       babyCryDetector?.startDetection()
+            } catch {
+                fatalError("Failed to load models: \(error.localizedDescription)")
+            }
+        }
     
     private func setupUI() {
         view.backgroundColor = .white
@@ -46,15 +64,117 @@ class ViewController: UIViewController {
         }
     }
     
-    func sigmoid(_ x: Double) -> Double {
-        return 1 / (1 + exp(-x))
-    }
+    func handleBabyCryDetected(audioChunk: [Float]) {
+            // Process or store the audio chunk as needed
+            print("Audio chunk captured: \(audioChunk.count) samples")
+            // Convert audio chunk to .wav file
+            if let audioFileURL = saveAudioChunkAsWav(audioChunk: audioChunk) {
+                print("Filename:", audioFileURL)
+                
+//                uploadAudioFile(url: audioFileURL) call the actual API for sending audio to inference
+                    let fileManager = FileManager.default
+                        let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                        let fileURL = documentsURL.appendingPathComponent("babyCry.wav")
 
-    func roundSigmoid(_ out: Double) -> Int {
-        let sigmoidValue = sigmoid(out)
-        let roundedValue = round(sigmoidValue)
-        return Int(roundedValue)
-    }
+                       let activityViewController = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
+                        activityViewController.popoverPresentationController?.sourceView = self.view // For iPad compatibility
+
+                        present(activityViewController, animated: true, completion: nil)
+            }
+        }
+    
+    private func saveAudioChunkAsWav(audioChunk: [Float]) -> URL? {
+           let sampleRate: Float64 = 22050.0
+           let numChannels: UInt32 = 1
+           let bitsPerChannel: UInt32 = 16
+           
+           let fileManager = FileManager.default
+           let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+           let fileURL = documentsURL.appendingPathComponent("babyCry.wav")
+           
+        var outputFormat = AudioStreamBasicDescription(
+                    mSampleRate: sampleRate,
+                    mFormatID: kAudioFormatLinearPCM,
+                    mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+                    mBytesPerPacket: numChannels * (bitsPerChannel / 8),
+                    mFramesPerPacket: 1,
+                    mBytesPerFrame: numChannels * (bitsPerChannel / 8),
+                    mChannelsPerFrame: numChannels,
+                    mBitsPerChannel: bitsPerChannel,
+                    mReserved: 0
+                )
+        
+           var audioFile: ExtAudioFileRef?
+           var status = ExtAudioFileCreateWithURL(fileURL as CFURL, kAudioFileWAVEType, &outputFormat, nil, AudioFileFlags.eraseFile.rawValue, &audioFile)
+           if status != noErr {
+               print("Error creating audio file: \(status)")
+               return nil
+           }
+           
+           let bufferLength = audioChunk.count * MemoryLayout<Int16>.size
+           var convertedData = Data(count: bufferLength)
+           convertedData.withUnsafeMutableBytes { (convertedBuffer: UnsafeMutableRawBufferPointer) in
+               let convertedPointer = convertedBuffer.bindMemory(to: Int16.self).baseAddress!
+               for (index, sample) in audioChunk.enumerated() {
+                   let intSample = Int16(sample * Float(Int16.max))
+                   convertedPointer[index] = intSample
+               }
+           }
+           
+           let buffer = convertedData.withUnsafeBytes { (bufferPointer: UnsafeRawBufferPointer) in
+               return AudioBuffer(mNumberChannels: numChannels, mDataByteSize: UInt32(bufferLength), mData: UnsafeMutableRawPointer(mutating: bufferPointer.baseAddress!))
+           }
+           
+           var bufferList = AudioBufferList(mNumberBuffers: 1, mBuffers: buffer)
+           status = ExtAudioFileWrite(audioFile!, UInt32(audioChunk.count), &bufferList)
+           if status != noErr {
+               print("Error writing audio file: \(status)")
+               return nil
+           }
+           
+           ExtAudioFileDispose(audioFile!)
+           return fileURL
+       }
+    
+    @IBAction func startDetectionButtonClicked(_ sender: Any) {
+        if isDetecting {
+                    // Stop detection
+                    babyCryDetector?.stopDetection()
+                    startDetectionButton.setTitle("Start Detection", for: .normal)
+                    statusLabel.text = "Not listening"
+                    isDetecting = false
+                } else {
+                    // Start detection
+                    if testFrequencyTextFiled.text == nil || testFrequencyTextFiled.text!.isEmpty ||
+                       detectionSensitivityTextField.text == nil || detectionSensitivityTextField.text!.isEmpty ||
+                       cryEndThresholdTextField.text == nil || cryEndThresholdTextField.text!.isEmpty ||
+                       cryTranslationLength.text == nil || cryTranslationLength.text!.isEmpty {
+                        let alert = UIAlertController(title: "Cappella", message: "All fields are mandatory.", preferredStyle: .alert)
+                        alert.addAction(UIAlertAction(title: "Okay", style: .default, handler: nil))
+                        present(alert, animated: true, completion: nil)
+                    } else {
+                        if let testFrequency = Double(testFrequencyTextFiled.text!),
+                           let detectionSensitivity = Int(detectionSensitivityTextField.text!),
+                           let cryEndThreshold = Int(cryEndThresholdTextField.text!),
+                           let cryTranslationLength = Double(cryTranslationLength.text!) {
+                            setupUI()
+                            setupBabyCryDetector(
+                                cryTranslationLength: cryTranslationLength,
+                                testFrequency: testFrequency,
+                                detectionSensitivity: detectionSensitivity,
+                                cryEndThreshold: cryEndThreshold
+                            )
+                            babyCryDetector?.startDetection()
+                            startDetectionButton.setTitle("Stop Detection", for: .normal)
+                            isDetecting = true
+                        } else {
+                            let alert = UIAlertController(title: "Cappella", message: "Invalid input values.", preferredStyle: .alert)
+                            alert.addAction(UIAlertAction(title: "Okay", style: .default, handler: nil))
+                            present(alert, animated: true, completion: nil)
+                        }
+                    }
+                }
+            }
 }
 
 class BabyCryDetector {
@@ -65,22 +185,32 @@ class BabyCryDetector {
     private let babyCryDetectionModel: MLModel
     private let bufferQueue: CircularBuffer<Float>
     private let sampleRate: Double
-    private let bufferLengthInSeconds: Double = 2.0 // 2 seconds buffer length
-    private let processingInterval: Double = 0.1 // 0.1 second processing interval
+    private let cryTranslationLength: Double
+    private let secondaryBufferQueue: CircularBuffer<Float> //additional buffer
+    private let testFrequency: Double
     private weak var viewController: ViewController?
     private var detectInRow: Int = 0
-    private let sensitivity: Int = 18
-    
+    private var noCryInRow: Int = 0
+    private let detectionSensitivity: Int
+    private let cryEndThreshold: Int
+
     private var processingTimer: Timer?
-    
-    init(melSpectrogramModel: MLModel, babyCryDetectionModel: MLModel, viewController: ViewController) {
+    private var detectionStartIndex: Int?
+
+
+    init(melSpectrogramModel: MLModel, babyCryDetectionModel: MLModel, viewController: ViewController, cryTranslationLength: Double, testFrequency: Double, detectionSensitivity: Int, cryEndThreshold: Int) {
         self.melSpectrogramModel = melSpectrogramModel
         self.babyCryDetectionModel = babyCryDetectionModel
         self.viewController = viewController
         self.inputNode = audioEngine.inputNode
         self.sampleRate = 22050.0 // Adjusted to match given sample rate
-        self.bufferSize = AVAudioFrameCount(sampleRate * bufferLengthInSeconds)
-        self.bufferQueue = CircularBuffer<Float>(capacity: Int(sampleRate * bufferLengthInSeconds))
+        self.cryTranslationLength = cryTranslationLength
+        self.testFrequency = testFrequency
+        self.detectionSensitivity = detectionSensitivity
+        self.cryEndThreshold = cryEndThreshold
+        self.bufferSize = AVAudioFrameCount(sampleRate * cryTranslationLength)
+        self.bufferQueue = CircularBuffer<Float>(capacity: Int(sampleRate * cryTranslationLength))
+        self.secondaryBufferQueue = CircularBuffer<Float>(capacity: Int(sampleRate * cryTranslationLength))
         
         setupAudioSession()
         setupAudioEngine()
@@ -95,7 +225,7 @@ class BabyCryDetector {
     
     private func setupAudioEngine() {
         let inputFormat = inputNode.inputFormat(forBus: 0)
-        
+        sleep(5)
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { [weak self] (buffer, time) in
             self?.processAudioBuffer(buffer: buffer)
         }
@@ -108,14 +238,28 @@ class BabyCryDetector {
         startProcessingTimer()
     }
     
+    func stopDetection() {
+        processingTimer?.invalidate()
+        processingTimer = nil
+        audioEngine.stop()
+        inputNode.removeTap(onBus: 0)
+        
+        // Clear or reset buffers to stop processing
+        self.clearBuffers()
+            
+            // Reset UI or update labels as needed
+        viewController?.updateStatusLabel(with: "Detection stopped")
+    }
+    
     // This function will make sure that it is called every 0.1 sec i.e processing interval
     private func startProcessingTimer() {
-        processingTimer = Timer.scheduledTimer(withTimeInterval: processingInterval, repeats: true) { [weak self] timer in
+        processingTimer = Timer.scheduledTimer(withTimeInterval: testFrequency, repeats: true) { [weak self] timer in
             self?.runModelsOnBuffer()
         }
     }
     
-    private func stopProcessingTimer() {
+     func stopProcessingTimer() {
+        self.audioEngine.stop()
         processingTimer?.invalidate()
         processingTimer = nil
     }
@@ -126,22 +270,66 @@ class BabyCryDetector {
         
         for i in 0..<frameLength {
             bufferQueue.push(channelData[i])
+            secondaryBufferQueue.push(channelData[i])
         }
         
         //This will maintain a buffer size of 2 seconds of latest audio chunck
         while bufferQueue.count > Int(bufferSize) {
             _ = bufferQueue.pop()
         }
+        
+        // Maintain the additional buffer size of 1.2 seconds
+        while secondaryBufferQueue.count > Int(bufferSize) {
+            _ = secondaryBufferQueue.pop()
+        }
+    }
+    
+    func getDocumentsDirectory() -> URL {
+        let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+        print("Audio Path: ", paths[0])
+        return paths[0]
     }
     
     private func runModelsOnBuffer() {
-        let audioData = bufferQueue.toArray()
-        guard let melSpectrogram = createMelSpectrogram(from: audioData) else { return }
-        guard let babyCryDetected = detectBabyCry(using: melSpectrogram) else { return }
-        
-        if babyCryDetected {
-            triggerAlert()
+        if self.viewController?.isDetecting == true {
+            let audioData = bufferQueue.toArray()
+            guard let melSpectrogram = createMelSpectrogram(from: audioData) else { return }
+            guard let babyCryDetected = detectBabyCry(using: melSpectrogram) else { return }
+            
+            //send audio if baby cry reaches 18 i.e. 1.8 seconds
+            if babyCryDetected {
+                
+                self.viewController?.cryStatusLabel.text = "Baby Cry Started"
+                if detectInRow == 0 {
+                    detectionStartIndex = bufferQueue.count - Int(sampleRate * cryTranslationLength)
+                }
+                detectInRow += 1
+                noCryInRow = 0 // reset noCryInRow since baby cry is detected
+                print("Detection in a row:", self.detectInRow)
+                self.viewController?.cryOutputLabel.text = "Baby Cry in a row:\(self.detectInRow)"
+                if detectInRow == detectionSensitivity {
+                    triggerAlert()
+                    detectInRow = 0
+                    detectionStartIndex = nil
+                }
+            } else {
+                self.viewController?.cryStatusLabel.text = "Baby Cry Stopped"
+                detectInRow = 0
+                detectionStartIndex = nil
+                noCryInRow += 1
+                print("Non cry in a row:", self.noCryInRow)
+                self.viewController?.cryOutputLabel.text = "Baby Non-Cry in row:\(self.noCryInRow)"
+                if noCryInRow == cryEndThreshold {
+                    viewController?.updateStatusLabel(with: "Baby cry ended!")
+                    noCryInRow = 0
+                }
+            }
         }
+    }
+    
+    func clearBuffers() {
+        bufferQueue.clear()
+        secondaryBufferQueue.clear()
     }
     
     private func createMelSpectrogram(from audioData: [Float]) -> MLMultiArray? {
@@ -150,7 +338,6 @@ class BabyCryDetector {
         for (index, value) in audioData.enumerated() {
             audioBuffer?[index] = NSNumber(value: value)
         }
-        
         do {
             let model = try wave_to_logmel(configuration: MLModelConfiguration())
             let input = wave_to_logmelInput(x_1: audioBuffer!)
@@ -179,20 +366,7 @@ class BabyCryDetector {
             let babyCryDetected = sigmoid >= threshold
             
             print("Raw Output:\(logitArray), Sigmoid:\(sigmoid), Baby Cry:\(babyCryDetected)")
-            
-            if babyCryDetected {
-                self.detectInRow += 1
-                print("Detection in a row:", self.detectInRow)
-                if self.detectInRow == self.sensitivity {
-                    self.detectInRow = 0
-                    return true
-                } else {
-                    return false
-                }
-            } else {
-                self.detectInRow = 0
-                return false
-            }
+            return babyCryDetected
         } catch {
             print("Failed to generate mel spectrogram: \(error.localizedDescription)")
             return nil
@@ -201,6 +375,13 @@ class BabyCryDetector {
     
     private func triggerAlert() {
         viewController?.updateStatusLabel(with: "Baby cry detected!")
+        if let detectionStartIndex = detectionStartIndex, detectionStartIndex >= 0 {
+            let additionalAudioChunk = secondaryBufferQueue.toArray()
+            if detectionStartIndex < additionalAudioChunk.count {
+                let completeAudioChunk = additionalAudioChunk[detectionStartIndex..<additionalAudioChunk.count]
+                viewController?.handleBabyCryDetected(audioChunk: Array(completeAudioChunk))
+            }
+        }
     }
 }
 
@@ -268,148 +449,3 @@ extension CircularBuffer where T: ExpressibleByFloatLiteral {
         return toArray().compactMap { $0 as? Float }
     }
 }
-
-
-
-
-
-
-//class ViewController: UIViewController {
-//
-//    var recordingSession: AVAudioSession!
-//    var audioRecorder: AVAudioRecorder!
-//    var fileName: URL = URL(fileURLWithPath: "")
-//    var stopRecordingBool = false
-//
-//    override func viewDidLoad() {
-//        super.viewDidLoad()
-//        // Do any additional setup after loading the view.
-//    }
-//
-//    func recordingSessionStart() {
-//        recordingSession = AVAudioSession.sharedInstance()
-//            do {
-//                try recordingSession.setCategory(AVAudioSession.Category.playAndRecord, mode: .videoRecording)
-//                try recordingSession.setActive(true)
-//                recordingSession.requestRecordPermission() { [unowned self] allowed in
-//                    DispatchQueue.main.async {
-//                        if allowed {
-//                            self.startRecording()
-////                            self.startTimer()
-//                        } else {
-//                            // failed to record!
-//                        }
-//                    }
-//                }
-//            } catch {
-//                // failed to record!
-//            }
-//    }
-//
-//    func startRecording() {
-//        fileName = getDocumentsDirectory().appendingPathComponent("recording.wav")
-//
-//        let settings = [
-//            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-//            AVSampleRateKey: 44100,
-//            AVNumberOfChannelsKey: 1,
-//            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
-//        ] as [String : Any]
-//                do{
-//                    audioRecorder = try AVAudioRecorder(url: fileName, settings: settings)
-//                    if(audioRecorder.record(forDuration: 2 )) {
-//                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-//                            print("recording succesfull...")
-//                            if self.audioRecorder != nil {
-//                                self.audioRecorder.stop()
-//                                self.audioRecorder = nil
-//                                if self.stopRecordingBool == false {
-////                                    self.sendAudioToInference()
-//                                    //convert the audio mel and get the result here
-//                                    guard let audioFile = try? AVAudioFile(forReading: self.fileName) else {
-//                                        print("Failed to initialize AVAudioFile.")
-//                                    }
-//                                    // Get the format of the audio file
-//                                    let format = audioFile.processingFormat
-//                                    // Get the length of the audio file in frames
-//                                    let frameCount = AVAudioFrameCount(audioFile.length)
-//                                    // Create a buffer to hold the audio data
-//                                    guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
-//                                        print("Failed to create PCM buffer.")
-//                                    }
-//                                    // Read the audio file into the buffer
-//                                    guard (try? audioFile.read(into: buffer)) != nil else {
-//                                        print("Failed to read audio file into buffer.")
-//                                    }
-//                                }
-//                            }
-//                        }
-//                    }
-//                }
-//                catch {
-//                    print ("failed...")
-//                }
-//    }
-//
-//    func getDocumentsDirectory() -> URL {
-//        let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
-//        print("Audio Path: ", paths[0])
-//        return paths[0]
-//    }
-//
-//    func generateMelSpectrogram() -> MLMultiArray? {
-////        let monoSignal: [Float] =
-////        print("Mono Signal:", monoSignal.prefix(upTo: 5))
-//
-//        guard let tensor = try? MLMultiArray(shape: [1, NSNumber(value: monoSignal.count)], dataType: .float32) else {
-//            print("Failed to create MLMultiArray.")
-//            return nil
-//        }
-//
-//        var monoSignal = [Float](repeating: 0, count: Int(audioData.frameLength))
-//        print("Mono Signal:", monoSignal.prefix(upTo: 5))
-//
-//        for i in 0..<monoSignal.count {
-//            tensor[i] = NSNumber(value: monoSignal[i])
-//        }
-//        print("Tensor Shape:", tensor.shape)
-//        print("Tensor DataType:", tensor.dataType)
-//        do {
-//            let model = try wave_to_logmel(configuration: MLModelConfiguration())
-//            let input = wave_to_logmelInput(x_1: tensor)
-//            let prediction = try model.prediction(input: input)
-//            print("Model input created:", input)
-//            print("Feature Names:", prediction.featureNames)
-//            print("var_62:", prediction.var_62)
-//            print("var_62 Shaped Array:", prediction.var_62ShapedArray)
-//            print("var_62 Values:", prediction.featureValue(for: "var_62")!)
-//
-//            let model1 = try encodedBabyCryDetectionModel(configuration: MLModelConfiguration())
-//            let input1 = encodedBabyCryDetectionModelInput(audio: prediction.var_62ShapedArray)
-//            let prediction1 = try model1.prediction(input: input1)
-//            print("Model1 input created:", input1)
-//            print("Feature Names1:", prediction1.featureNames)
-//            print("var_104:", prediction1.var_104)
-//            print("var_104 Shaped Array:", prediction1.var_104ShapedArray)
-//            print("var_104 Values:", prediction1.featureValue(for: "var_104")!)
-//
-//            //Assuming the output property is a float value indicating the logit
-//            let logitArray = prediction1.var_104ShapedArray // Replace 'output' with the actual property name
-//            print("Logit array:", logitArray)
-//            // Extract the logit value from the MLShapedArray
-//            let logitSlice = logitArray[0]
-//            guard let logit = logitSlice.scalar else {
-//                print("Failed to extract logit value.")
-//                return nil
-//            }
-//            print("Logit value:", logit)
-//            let probability = 1 / (1 + exp(-logit))
-//            print("Probability:", probability)
-//            return tensor
-//        } catch {
-//            print("Failed to generate mel spectrogram: \(error.localizedDescription)")
-//            return nil
-//        }
-//    }
-//}
-
